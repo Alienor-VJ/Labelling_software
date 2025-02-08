@@ -1,5 +1,5 @@
 --find-links https://download.pytorch.org/whl/torch_stable.html
-opencv-python
+opencv-python==4.8.1.78
 numpy
 pillow
 pandas

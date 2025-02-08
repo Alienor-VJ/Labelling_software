@@ -5,9 +5,9 @@ from tkinter import filedialog
 from PIL import Image, ImageTk
 import math
 
+
 class ImageSegmentationApp:
     def __init__(self, root):
-        print("Initializing App")
         self.root = root
         self.root.title("Segmentation and Area Calculation")
         self.root.attributes("-fullscreen", True)
@@ -20,9 +20,8 @@ class ImageSegmentationApp:
         self.current_shape = []  # List of points (vertices) of the current polygon
         self.shapes = []  # List of all drawn shapes
         self.selected_shape = None
-        self.selected_points = []  # List of points selected for modification
-        self.proposed_reshape = None  # Store the proposed reshaped shape
-        self.spot_data = []
+        self.selected_point = None  # The selected point in the shape to modify
+        self.categories = {"Sure": [], "Unsure": [], "Plaque": []}
 
         self.load_button = Button(root, text="Load Image", command=self.load_image)
         self.load_button.pack()
@@ -42,8 +41,29 @@ class ImageSegmentationApp:
         self.list_frame = Frame(self.main_frame, width=300)
         self.list_frame.pack(side=RIGHT, fill=Y)
 
-        self.table = Text(self.list_frame, height=30, width=40)  # Adjusted size for the surface area list
-        self.table.pack(fill=Y)
+        # Adding titles for the lists
+        self.title_sure = Label(self.list_frame, text="Sure", font=("Helvetica", 14, "bold"))
+        self.title_sure.pack()
+        self.table_sure = Text(self.list_frame, height=10, width=40)
+        self.table_sure.pack(fill=Y)
+
+        self.title_unsure = Label(self.list_frame, text="Unsure", font=("Helvetica", 14, "bold"))
+        self.title_unsure.pack()
+        self.table_unsure = Text(self.list_frame, height=10, width=40)
+        self.table_unsure.pack(fill=Y)
+
+        self.title_plaque = Label(self.list_frame, text="Plaque", font=("Helvetica", 14, "bold"))
+        self.title_plaque.pack()
+        self.table_plaque = Text(self.list_frame, height=10, width=40)
+        self.table_plaque.pack(fill=Y)
+
+        # Adding mean area labels
+        self.mean_area_label_sure = Label(self.list_frame, text="Mean Area (Sure): -", font=("Helvetica", 12))
+        self.mean_area_label_sure.pack()
+        self.mean_area_label_unsure = Label(self.list_frame, text="Mean Area (Unsure): -", font=("Helvetica", 12))
+        self.mean_area_label_unsure.pack()
+        self.mean_area_label_plaque = Label(self.list_frame, text="Mean Area (Plaque): -", font=("Helvetica", 12))
+        self.mean_area_label_plaque.pack()
 
         # Bind events
         self.canvas.bind("<Button-1>", self.click_event)
@@ -52,10 +72,88 @@ class ImageSegmentationApp:
         self.root.bind("<Return>", self.save_and_close)
         self.root.bind("<s>", self.suppress_shape)  # Bind the 'S' key to suppress the shape
         self.root.bind("<a>", self.deselect_shape)  # Bind the 'A' key to deselect the shape
-        self.root.bind("<d>", self.accept_reshape)  # Bind the 'D' key to accept the reshape
-        self.root.bind("<f>", self.reject_reshape)  # Bind the 'F' key to reject the reshape
-
+        self.root.bind("<u>", self.set_unsure)  # Bind the 'U' key to categorize as unsure
+        self.root.bind("<p>", self.set_plaque)  # Bind the 'P' key to categorize as plaque
         self.root.bind("<Escape>", self.close_app)
+
+    def compute_distance(self, point):
+        # Compute the Euclidean distance from the center of the image
+        center = (self.original_img.shape[1] // 2, self.original_img.shape[0] // 2)
+        return math.sqrt((point[0] - center[0]) ** 2 + (point[1] - center[1]) ** 2)
+
+    def compute_ellipse_ratio(self, points):
+        # Fit an ellipse and compute the ratio of the larger to smaller axis
+        if len(points) < 5:  # Ellipse fitting requires at least 5 points
+            return None
+
+        # Fit ellipse
+        ellipse = cv2.fitEllipse(np.array(points, dtype=np.float32))
+        (center, (major_axis, minor_axis), angle) = ellipse
+        if minor_axis != 0:
+            return major_axis / minor_axis
+        return None
+
+    def update_area_tables(self):
+        # Clear previous content in the tables
+        self.table_sure.delete(1.0, END)
+        self.table_unsure.delete(1.0, END)
+        self.table_plaque.delete(1.0, END)
+
+        # Store the areas for each category to calculate the mean area
+        sure_areas = []
+        unsure_areas = []
+        plaque_areas = []
+
+        for category, shapes in self.categories.items():
+            for shape in shapes:
+                area = self.compute_area(shape)
+                distance = self.compute_distance(shape[0])  # Take the first point for simplicity
+                ellipse_ratio = self.compute_ellipse_ratio(shape)
+
+                # Display the values in the correct table
+                table_entry = f"Area: {area:.2f}, Dist: {distance:.2f}, Ellipse Ratio: {ellipse_ratio:.2f if ellipse_ratio else 'N/A'}\n"
+
+                if category == "Sure":
+                    self.table_sure.insert(END, table_entry)
+                    sure_areas.append(area)
+                elif category == "Unsure":
+                    self.table_unsure.insert(END, table_entry)
+                    unsure_areas.append(area)
+                elif category == "Plaque":
+                    self.table_plaque.insert(END, table_entry)
+                    plaque_areas.append(area)
+
+        # Calculate and update the mean area for each category
+        self.update_mean_area(sure_areas, unsure_areas, plaque_areas)
+
+    def update_mean_area(self, sure_areas, unsure_areas, plaque_areas):
+        # Calculate the mean area for each category and update the labels
+        mean_sure = sum(sure_areas) / len(sure_areas) if sure_areas else 0
+        mean_unsure = sum(unsure_areas) / len(unsure_areas) if unsure_areas else 0
+        mean_plaque = sum(plaque_areas) / len(plaque_areas) if plaque_areas else 0
+
+        # Update the mean area labels
+        self.mean_area_label_sure.config(text=f"Mean Area (Sure): {mean_sure:.2f}")
+        self.mean_area_label_unsure.config(text=f"Mean Area (Unsure): {mean_unsure:.2f}")
+        self.mean_area_label_plaque.config(text=f"Mean Area (Plaque): {mean_plaque:.2f}")
+
+    def compute_area(self, shape):
+        # Compute the area of the shape (polygon)
+        return cv2.contourArea(np.array(shape))
+
+    def save_and_close(self, event=None):
+        # Save the current shapes into a file or database (e.g., CSV, JSON)
+        with open("shapes_data.txt", "w") as file:
+            for category, shapes in self.categories.items():
+                for shape in shapes:
+                    file.write(f"{category}: {shape}\n")
+
+        print("Shapes saved successfully!")
+        self.root.quit()  # Close the application
+
+    def close_app(self, event=None):
+        # Close the application without saving
+        self.root.quit()
 
     def load_image(self):
         self.img_path = filedialog.askopenfilename()
@@ -89,59 +187,87 @@ class ImageSegmentationApp:
             self.show_image()
 
     def show_image(self):
+        if self.image is None:
+            print("Error: No image loaded!")
+            return
+
         temp_image = self.image.copy()
 
-        # Draw the shapes already created
-        for i, shape in enumerate(self.shapes):
-            if len(shape) > 1:
-                color = (255, 255, 0) if i == self.selected_shape else (0, 255, 0)
-                cv2.polylines(temp_image, [np.array(shape)], isClosed=True, color=color, thickness=2)
+        # Draw shapes on the image
+        for i, (shape, category) in enumerate(self.categories.items()):
+            for s in category:
+                pts = np.array(s, dtype=np.int32)
+                if len(pts) < 3:
+                    continue
 
-        # Draw the proposed reshape (in red)
-        if self.proposed_reshape is not None:
-            for reshape in self.proposed_reshape:
-                cv2.polylines(temp_image, [np.array(reshape)], isClosed=True, color=(0, 0, 255), thickness=2)
+                # Compute the area of the polygon
+                area = cv2.contourArea(pts)
+                print(f"Shape {i + 1} area: {area:.2f}")
 
-        # Draw the shape being drawn (real-time)
+                # Draw the shape on the image
+                pts_contour = pts.reshape((-1, 1, 2))
+                color = (0, 255, 0)  # Default color for sure category
+                if category == 'Unsure':
+                    color = (0, 255, 255)  # Yellow for unsure
+                elif category == 'Plaque':
+                    color = (255, 0, 0)  # Blue for plaque
+                elif self.selected_shape == s:
+                    color = (255, 0, 0)  # Blue when selected for modification
+                cv2.polylines(temp_image, [pts_contour], isClosed=True, color=color, thickness=2)
+
+        # Draw the current drawing (if any)
         if self.drawing and len(self.current_shape) > 1:
-            cv2.polylines(temp_image, [np.array(self.current_shape)], isClosed=False, color=(0, 255, 255), thickness=2)
+            pts_contour = np.array(self.current_shape, dtype=np.int32).reshape((-1, 1, 2))
+            cv2.polylines(temp_image, [pts_contour], isClosed=False, color=(0, 255, 255), thickness=2)
 
+        # Convert image for display
         image_rgb = cv2.cvtColor(temp_image, cv2.COLOR_BGR2RGB)
         img = ImageTk.PhotoImage(Image.fromarray(image_rgb))
+
         self.canvas.delete("all")
         self.canvas.create_image(0, 0, anchor=NW, image=img)
         self.canvas.image = img
 
-        # Update the area table
-        self.table.delete("1.0", END)
-        total_area = 0
-        areas = []
+        # Update the area tables for each category
+        self.update_area_tables()
 
-        for i, shape in enumerate(self.shapes):
-            if len(shape) > 2:
-                area = cv2.contourArea(np.array(shape))
-                areas.append(area)
+    def update_area_tables(self):
+        # Update the area tables for each category
+        self.table_sure.delete("1.0", END)
+        self.table_unsure.delete("1.0", END)
+        self.table_plaque.delete("1.0", END)
+
+        for category, shapes in self.categories.items():
+            total_area = 0
+            for shape in shapes:
+                pts = np.array(shape, dtype=np.int32)
+                if len(pts) < 3:
+                    continue
+                area = cv2.contourArea(pts)
                 total_area += area
-                self.table.insert(END, f"Shape {i + 1}: {area:.2f} pixels²\n")
+                if category == "Sure":
+                    self.table_sure.insert(END, f"Shape: {area:.2f} pixels²\n")
+                elif category == "Unsure":
+                    self.table_unsure.insert(END, f"Shape: {area:.2f} pixels²\n")
+                elif category == "Plaque":
+                    self.table_plaque.insert(END, f"Shape: {area:.2f} pixels²\n")
 
-        if areas:
-            mean_area = total_area / len(areas)
-            self.table.insert(END, f"\nTotal Surface Area: {total_area:.2f} pixels²")
-            self.table.insert(END, f"\nMean Surface Area: {mean_area:.2f} pixels²")
-        else:
-            self.table.insert(END, f"\nTotal Surface Area: 0.00 pixels²")
-            self.table.insert(END, f"\nMean Surface Area: 0.00 pixels²")
+            if category == "Sure":
+                self.table_sure.insert(END, f"Total Area: {total_area:.2f} pixels²")
+            elif category == "Unsure":
+                self.table_unsure.insert(END, f"Total Area: {total_area:.2f} pixels²")
+            elif category == "Plaque":
+                self.table_plaque.insert(END, f"Total Area: {total_area:.2f} pixels²")
 
     def click_event(self, event):
         # If the user clicks near the border of a shape, select it
-        for i, shape in enumerate(self.shapes):
+        for shape in self.categories["Sure"] + self.categories["Unsure"] + self.categories["Plaque"]:
             for j, point in enumerate(shape):
                 dx = event.x - point[0]
                 dy = event.y - point[1]
                 if abs(dx) < 10 and abs(dy) < 10:  # Select point if close enough
-                    self.selected_shape = i
-                    self.selected_points = self.get_nearby_points(i, event.x,
-                                                                  event.y)  # Select nearby points for modification
+                    self.selected_shape = shape
+                    self.selected_point = j
                     self.show_image()
                     return
 
@@ -151,14 +277,12 @@ class ImageSegmentationApp:
             self.drawing = True
 
     def drag_event(self, event):
-        # If a shape is selected, move the selected points
-        if self.selected_shape is not None and self.selected_points:
-            for idx in self.selected_points:
-                self.shapes[self.selected_shape][idx] = (event.x, event.y)
+        # If we are modifying a selected point, move it
+        if self.selected_shape is not None and self.selected_point is not None:
+            self.selected_shape[self.selected_point] = (event.x, event.y)
             self.show_image()
-            return
 
-        # If drawing a new shape, keep adding points as the user drags the mouse
+        # If drawing a new shape, keep adding points and redraw the shape
         if self.drawing:
             self.current_shape.append((event.x, event.y))
             self.show_image()
@@ -167,101 +291,46 @@ class ImageSegmentationApp:
         # If we are drawing a shape, finish it when the mouse is released
         if self.drawing:
             self.shapes.append(self.current_shape)
+            self.categories["Sure"].append(self.current_shape)
             self.drawing = False
-
-            # Propose a reshape for the newly drawn shape
-            self.propose_reshape(self.current_shape)
-
             self.show_image()
-
-    def propose_reshape(self, shape):
-        # Propose a more sophisticated reshape
-        expanded = self.expand_shape(shape)
-        self.proposed_reshape = expanded
-
-    def expand_shape(self, shape):
-        contour = np.array(shape, dtype=np.int32)
-
-        # Canny edge detection for boundary
-        edges = cv2.Canny(self.mask, 100, 200)
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        expanded_contour = []
-        for cnt in contours:
-            if cv2.pointPolygonTest(cnt, (shape[0][0], shape[0][1]), False) >= 0:
-                expanded_contour.append(cnt)
-
-        # Apply smoothing (optional), here we use a basic Gaussian blur
-        smoothed_contour = cv2.GaussianBlur(np.array(expanded_contour, dtype=np.float32), (5, 5), 0)
-
-        return smoothed_contour
-
-    def accept_reshape(self, event):
-        # Accept the proposed reshape and add it to the shapes
-        if self.proposed_reshape is not None:
-            self.shapes.append(self.proposed_reshape)
-            self.proposed_reshape = None  # Clear the proposed reshape
-            self.show_image()
-
-    def reject_reshape(self, event):
-        # Reject the proposed reshape
-        self.proposed_reshape = None  # Clear the proposed reshape
-        self.show_image()
-
-    def save_and_close(self, event):
-        # Save the current image with annotations
-        if self.img_path:
-            save_path = self.img_path.replace(".jpg", "_annotated.jpg").replace(".png", "_annotated.png")
-            temp_image = self.original_img.copy()
-            for shape in self.shapes:
-                if len(shape) > 1:  # Only draw shapes with more than one point
-                    cv2.polylines(temp_image, [np.array(shape)], isClosed=True, color=(0, 255, 0), thickness=2)
-            cv2.imwrite(save_path, temp_image)
-            print(f"Image saved as {save_path}")
-
-        # Reset for a new image load
-        self.reset_app()
-
-        # Reopen the image file dialog to load a new image
-        self.load_image()
-
-    def reset_app(self):
-        # Reset the current state for a new image
-        self.shapes = []  # Clear all shapes
-        self.selected_shape = None
-        self.selected_points = []
-        self.current_shape = []
-        self.drawing = False
-        self.table.delete("1.0", END)  # Clear the table
-        self.canvas.delete("all")  # Clear the canvas
 
     def suppress_shape(self, event):
         # Suppress the selected shape
         if self.selected_shape is not None:
-            del self.shapes[self.selected_shape]  # Remove the selected shape
+            for category in self.categories.values():
+                if self.selected_shape in category:
+                    category.remove(self.selected_shape)
+                    break
             self.selected_shape = None  # Clear the selection
             self.show_image()  # Refresh the image
 
     def deselect_shape(self, event):
         # Deselect the current shape
         self.selected_shape = None
-        self.selected_points = []
+        self.selected_point = None
         self.show_image()  # Refresh the image
 
-    def get_nearby_points(self, shape_idx, x, y):
-        # Find nearby points in the selected shape to make modification smoother
-        shape = self.shapes[shape_idx]
-        selected_points = []
-        for i, point in enumerate(shape):
-            dx = x - point[0]
-            dy = y - point[1]
-            if abs(dx) < 15 and abs(dy) < 15:
-                selected_points.append(i)  # Select the point
-        return selected_points
+    def set_unsure(self, event):
+        if self.selected_shape:
+            self.move_shape_to_category("Unsure")
+            self.show_image()
+
+    def set_plaque(self, event):
+        if self.selected_shape:
+            self.move_shape_to_category("Plaque")
+            self.show_image()
+
+    def move_shape_to_category(self, category):
+        # Remove shape from all categories and add to the selected category
+        for cat in self.categories:
+            if self.selected_shape in self.categories[cat]:
+                self.categories[cat].remove(self.selected_shape)
+                break
+        self.categories[category].append(self.selected_shape)
 
     def close_app(self, event):
-        self.root.quit()  # Close the application
-
+        self.root.destroy()  # This will close the app
 
 if __name__ == "__main__":
     root = Tk()
